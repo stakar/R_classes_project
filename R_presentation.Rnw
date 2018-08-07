@@ -1,0 +1,376 @@
+\documentclass{article}
+
+\author{Stanis{/l}aw Karkosz}
+\title{Bakardjian System - implementation in R}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+\maketitle
+
+\section{Introduction}
+
+In modern days, Brain-Computer Interfaces are heated topic, for they are capable of helping disabled people, allowing them for using the computers without the necessity to move. Many approaches has arisen, how to make them more accurate, i.e. how to build them, so there make less command classification errors. 
+Bakardjian method is one of the approaches to improve such classification. It was created for steady state visually evoked potentials, merges a couple of known ways of signal processing to improve classification. It's modules does:
+\begin{itemize}
+  \item Signal acquisition
+  \item Artefact rejection
+  \item Bank of narrow-band filters
+  \item Variance analyser
+  \item Savitzky-Golay smoothing
+  \item Channel integration
+  \item Normalization
+  \item Classification
+\end{itemize}
+The main aim of this work is presentation of Bakardjian System's implementation in R. Bakardjian system consists of eight modules, six of them serves for signal analysis to improve proper classification. 
+
+\subsection{Signal Acqusition}
+
+At the first step, EEG signal was acuired from 128 electrodes. In my analysis, I used data from Bakardjian studies, which has consisted of 5 second break before 15 second stimuli presentation, thus I cut unnecesary part firstly. For this work, I am going to present how data processing work for 1 second time window. To evoke steady state visually evoked potentials, were used frequencies occuring with 8,14 and 28Hz.
+
+<<echo=False,fig=TRUE>>==
+
+
+#Preparing packages
+library(JADE)
+library(dplyr)
+library(signal)
+library(matrixStats)
+library(MASS)
+
+
+#path to files
+
+path <- 'Studia/kogni/Magisterka/data/SUBJ1/SSVEP_14Hz_Trial1_SUBJ1.csv'
+
+data <- read.csv(path,sep = ',',header = FALSE)
+
+data1 <- apply(data, FUN = as.numeric,MARGIN = c(1,2))
+
+#cutting off needles probes
+
+data<-data1[(5*256):(20*256),]
+
+#analysing 1 sec window of data
+
+data <- data[0:(1*256),]
+
+#exploring the data by plotting it
+
+t <- seq(1,15,length.out = length(data[,15]))
+plot(t,data[,15],type = 'l',xlab = 'time',ylab = 'Amplitude')
+title('Raw signal')
+
+
+@
+
+\subsection{Artifact rejection}
+
+Second module is an artifact rejector. For this purpose I use Blind Source Separation AMUSE algorithm, to reject all artifacts, such as eyes blinks. For further analysis I am going to use data from 3 electrodes, O1,O2,OZ, where steady state visually evoked potentials elicit strongly.
+
+<<echo=False,fig=True>>==
+#Blind Source Separation
+
+bss <- AMUSE(data)
+
+electrodes <- bss$S[,c(15,23,28)]
+
+plot(electrodes[,1])
+title('Electrode O1 after BSS')
+@
+
+\section{Bank of filters}
+
+THird module is a bank of band-pass filters. It filtered data at all targeted evoked frequecies, 8,14,28. For further analysis data consists of set of three channels for each frequency.
+
+<<echo=False,fig=True>>==
+#narrow-band bank of filters
+
+
+filtering <- function(data,low,high,freq){
+  b.low <- low/(freq*0.5)
+  b.high <- high/(freq*0.5)
+  but <- signal::butter(n=4,W=c(b.low,b.high),type='pass')
+  filtered <- signal::filtfilt(but$b,but$a,data)
+  return(filtered)
+}
+
+
+filtmat <- function(electrodes,low,high,freq){
+  
+  el <- matrix(nrow = nrow(electrodes),ncol = 
+                  ncol(electrodes)) 
+  for (n in 1:ncol(electrodes)){
+    tmp <- filtering(electrodes[,n],low,high,freq)
+    el[,n] <- tmp
+  }
+  return(el)
+}
+
+whole_filtering <- function(electrodes){
+
+  el.8<- filtmat(electrodes,7.9,8.1,256)
+  el.14 <- filtmat(electrodes,13.9,14.1,256)
+  el.28 <-filtmat(electrodes,27.9,28.1,256)
+  
+  return(list(el.8,el.14,el.28))
+}
+
+filtered <- whole_filtering(electrodes = electrodes)
+
+t <- seq(0,1,length.out = length(filtered[[1]]))
+
+plot(t,filtered[[1]],type = 'l',xlab = 'time',ylab = 'Amplitude')
+title('Electrode O1 after filtering')
+@
+
+\subsection{Variance analyzer}
+
+Next module analyses energy of signal; for this purpose, all data are turned into absolute value.
+
+<<echo=False,fig=True>>==
+
+#variance analyzer
+va <- list()
+for (n in 1:length(filtered)){
+  va[[n]] <- abs(filtered[[n]])
+}
+
+t <- seq(0,1,length.out = length(va[[1]]))
+
+plot(t,va[[1]],'l',xlab = 'time',ylab = 'Amplitude')
+title('Energy of electrode O1')
+@
+
+\subsection{Smoother}
+
+Next module smoothes the signal using Savitzky-Golay filtering.
+
+<<echo=False,fig=True>>==
+
+savgol <- function(va.matrix){
+  sgol <- list()
+    for (z in 1:length(va)) {
+    tmp <- matrix(nrow = nrow(va[[z]]),
+                  ncol = ncol(va[[z]]))
+    
+    for (n in 1:ncol(va[[z]])){
+      tmp[,n] <- sgolayfilt(va[[z]][,n],
+                            p=2,
+                            n=length(va[[z]][,n])-1)
+    }
+    sgol[[z]] <- tmp
+  }
+  return(sgol)
+}
+
+sgfiltered <- savgol(va)
+
+t <- seq(0,1,length.out = length(sgfiltered[[1]]))
+
+plot(t,sgfiltered[[1]],'l',xlab = 'time',ylab = 'Amplitude')
+title('Electrode O1 after Savitzky-Golay smoothing')
+@
+
+\subsection{Channel integrator}
+
+Next module integrates data from all channels for each frequency.
+
+<<echo=False,fig=True>>==,xlab = 'time',ylab = 'Amplitude'
+
+#channel integrator
+
+integrator <- function(sg.list){
+  integrated <- matrix(nrow = nrow(sg.list[[1]]),
+                       ncol = ncol(sg.list[[1]]))
+  for (n in 1:length(sg.list)) {
+    integrated[,n] <- rowMeans(sg.list[[n]])
+  }
+  return(integrated)
+}
+
+integ <- integrator(sgfiltered)
+
+t <- seq(0,1,length.out = length(integ[,1]))
+
+plot(t,integ[,1],'l',xlab = 'time',ylab = 'Amplitude')
+title('Integrated signal for 8Hz frequency')
+@
+
+\subsection{Normalizer}
+
+Last data analysing module is normalizer. That normalize data to band between 0 and 1.
+
+<<echo=False,fig=True>>==
+
+#normalizer for 14 Hz band
+
+normalizer <- function(int.list){
+  norm.list <- matrix(nrow = nrow(int.list),
+                      ncol = ncol(int.list))
+  for (n in 1:ncol(int.list)) {
+    norm.list[,n] <- int.list[,n]/rowSums(int.list)
+  }
+  return(norm.list)
+}
+norm <- normalizer(integ)
+
+t <- seq(0,1,length.out = length(norm[,1]))
+
+plot(t,norm[,1],'l',xlim = c(0.1,0.6),ylim = c(-1,2),xlab = 'time',ylab = 'Amplitude')
+title('Normalized data, proper look')
+@
+
+This is how signal supposed to look like, but at some point weird occurance happened:
+
+<<echo=False,fig=True>>==
+
+plot(t,norm[,1],'l',ylim = c(-1,2),xlab = 'time',ylab = 'Amplitude')
+title('Signal for 8 Hz frequency; strange occurance')
+
+@
+
+I am not really shure what happened, and I could not get rid of this error.
+
+\subsection{Classification}
+
+In last module, the classificator decided, at which stimuli the user was looking, and proper command was classified. I used LDA classificator, which is widely used in brain-computer interfaces that bases on evoked potentials paradigm, however it didn't worked well. It can be caused by occured error displayed earlier.
+
+The accuracy of LDA classifier was:
+<<echo=False,results=verbatim>>==
+sysBak <- function(path,list.electrodes,chunk){
+  
+  data <- read.csv(path,sep = ',',header = FALSE)
+  data1 <- apply(data, FUN = as.numeric,MARGIN = c(1,2))
+  data<-data1[(5*256):(20*256),]
+  data <- data[((chunk-1)*256):(chunk*256),]
+  bss <- AMUSE(data)
+  electrodes <- bss$S[,list.electrodes]
+  filtered <- whole_filtering(electrodes = electrodes)
+  va <- list()
+  for (n in 1:length(filtered)){
+    va[[n]] <- abs(filtered[[n]])
+  }
+  sgfiltered <- savgol(va)
+  integ <- integrator(sgfiltered)
+  norm <- normalizer(integ)
+  
+  return(norm)
+}
+train <- sample(1:150, 75)
+
+res  <- sysBak('Studia/kogni/Magisterka/data/SUBJ1/SSVEP_8Hz_Trial1_SUBJ1.csv',chunk = 1,list.electrodes = c(13,21,28))
+
+res14 <- cbind(sysBak('Studia/kogni/Magisterka/data/SUBJ1/SSVEP_14Hz_Trial1_SUBJ1.csv',list.electrodes = c(15,23,28),chunk = 1),rep(2,257))
+res8 <- cbind(sysBak('Studia/kogni/Magisterka/data/SUBJ1/SSVEP_8Hz_Trial1_SUBJ1.csv',list.electrodes = c(15,23,28),chunk = 1),rep(1,257))
+res28 <- cbind(sysBak('Studia/kogni/Magisterka/data/SUBJ1/SSVEP_28Hz_Trial1_SUBJ1.csv',list.electrodes = c(15,23,28),chunk = 1),rep(3,257))
+
+path8 <- 'Studia/kogni/Magisterka/data/SUBJ1/SSVEP_8Hz_Trial1_SUBJ1.csv'
+path14 <- 'Studia/kogni/Magisterka/data/SUBJ1/SSVEP_14Hz_Trial1_SUBJ1.csv'
+path28 <- 'Studia/kogni/Magisterka/data/SUBJ1/SSVEP_28Hz_Trial1_SUBJ1.csv'
+
+datasetmat<- rbind(res8,res14,res28)
+
+
+for (n in 2:10){
+  tmp <- cbind(sysBak(path8,list.electrodes = c(15,23,28),chunk = n),rep(1,257))
+  datasetmat <- rbind(datasetmat,tmp)
+  
+  tmp2 <- cbind(sysBak(path14,list.electrodes = c(15,23,28),chunk = n),rep(2,257))
+  datasetmat <- rbind(datasetmat,tmp2)
+  
+ tmp3 <- cbind(sysBak(path28,list.electrodes = c(15,23,28),chunk = n),rep(3,257))
+ datasetmat <- rbind(datasetmat,tmp3)
+}
+
+dataset <- data.frame(datasetmat)
+colnames(dataset)<- c('8','14','28','target')
+
+
+train <- sample(1:nrow(dataset),1000) 
+
+mod <-lda(dataset$target~.,dataset,subset = train)
+predclass <- predict(mod,dataset[-train,])$class
+accurate <- count(dataset$target[-train] == predclass)
+accuracy <- accurate/length(dataset$target[-train])
+accuracy
+@
+
+I tried also make canonical correlation classifier, but results weren't any better:
+
+<<echo=False>>==
+
+reference <- function(data,freq,sec=1){
+  
+  ref1 <- cos(seq(0,sec,length.out = length(data))*2*pi*freq)
+  ref2 <- sin(seq(0,sec,length.out = length(data))*2*pi*freq)
+  return(list(ref1,ref2))
+}
+cancorclass <- function(data){
+  res <- matrix(0,1,2)
+  for (z in list(8,14,28)){
+    for (n in 1:3){
+      corcan <- max(cancor(norm[,n],reference(norm[,n],z)[[1]])$cor,cancor(norm[,n],reference(norm[,n],z)[[2]])$cor)
+      res <- rbind(res,c(corcan,z))
+    }
+  }
+  wm <- which.max(res[,1])
+  result <- res[wm,2]
+  return(result)
+}
+
+res <- matrix(0,1,2)
+for (n in 2:10){
+  tmp <- cancorclass(sysBak(path8,list.electrodes = c(15,23,28),chunk = n))
+  res <- rbind(res,c(tmp,8))
+  
+  tmp <- cancorclass(sysBak(path14,list.electrodes = c(15,23,28),chunk = n))
+  res <- rbind(res,c(tmp,14))
+  
+  tmp <- cancorclass(sysBak(path28,list.electrodes = c(15,23,28),chunk = n))
+  res <- rbind(res,c(tmp,28))
+  
+}
+count(res[,1] == res[,2])/nrow(res)
+@
+
+It performed a little better for 2-class problem, but still, it wasn't satysfying:
+
+<<echo=False>>==
+reference <- function(data,freq,sec=1){
+  
+  ref1 <- cos(seq(0,sec,length.out = length(data))*2*pi*freq)
+  ref2 <- sin(seq(0,sec,length.out = length(data))*2*pi*freq)
+  return(list(ref1,ref2))
+}
+cancorclass <- function(data){
+  res <- matrix(0,1,2)
+  for (z in list(8,14)){
+    for (n in 1:3){
+      corcan <- max(cancor(norm[,n],reference(norm[,n],z)[[1]])$cor,cancor(norm[,n],reference(norm[,n],z)[[2]])$cor)
+      res <- rbind(res,c(corcan,z))
+    }
+  }
+  wm <- which.max(res[,1])
+  result <- res[wm,2]
+  return(result)
+}
+
+res <- matrix(0,1,2)
+for (n in 2:10){
+  tmp <- cancorclass(sysBak(path8,list.electrodes = c(15,23,28),chunk = n))
+  res <- rbind(res,c(tmp,8))
+  
+  tmp <- cancorclass(sysBak(path14,list.electrodes = c(15,23,28),chunk = n))
+  res <- rbind(res,c(tmp,14))
+  
+  
+}
+count(res[,1] == res[,2])/nrow(res)
+
+@
+
+\section{Summary}
+It is important to new technics of signal processing, when focusing on Brain-COmputer Interfaces. Presented implementation in R is not the best one, but with a little bit more effort it should have been sufficient.
+
+\end{document}
